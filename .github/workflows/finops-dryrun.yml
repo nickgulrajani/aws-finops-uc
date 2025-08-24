@@ -134,38 +134,36 @@ jobs:
           set -euo pipefail
           mkdir -p dashboards
           if [ ! -f dashboards/cost-kpis.json ]; then
-            cat > dashboards/cost-kpis.json <<'JSON'
-{
-  "title": "FinOps KPIs",
-  "timezone": "browser",
-  "schemaVersion": 39,
-  "version": 1,
-  "tags": ["finops", "cost"],
-  "panels": [
-    {
-      "type": "timeseries",
-      "title": "Estimated Spend (Monthly)",
-      "targets": [
-        { "refId": "A", "datasource": "CostExplorer", "query": "EstimatedCharges{Granularity=\"MONTHLY\"}" }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Tag Coverage (Required Tags Present)",
-      "targets": [
-        { "refId": "B", "datasource": "Custom", "query": "tag_coverage_percent" }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Anomalies (Last 7 days)",
-      "targets": [
-        { "refId": "C", "datasource": "CostExplorer", "query": "Anomalies{LookBack=\"7d\"}" }
-      ]
-    }
-  ]
-}
-JSON
+            jq -n '{
+              title: "FinOps KPIs",
+              timezone: "browser",
+              schemaVersion: 39,
+              version: 1,
+              tags: ["finops","cost"],
+              panels: [
+                {
+                  type: "timeseries",
+                  title: "Estimated Spend (Monthly)",
+                  targets: [
+                    { refId: "A", datasource: "CostExplorer", query: "EstimatedCharges{Granularity=\"MONTHLY\"}" }
+                  ]
+                },
+                {
+                  type: "stat",
+                  title: "Tag Coverage (Required Tags Present)",
+                  targets: [
+                    { refId: "B", datasource: "Custom", query: "tag_coverage_percent" }
+                  ]
+                },
+                {
+                  type: "stat",
+                  title: "Anomalies (Last 7 days)",
+                  targets: [
+                    { refId: "C", datasource: "CostExplorer", query: "Anomalies{LookBack=\"7d\"}" }
+                  ]
+                }
+              ]
+            }' > dashboards/cost-kpis.json
             echo "Created dashboards/cost-kpis.json placeholder"
           else
             echo "dashboards/cost-kpis.json already present"
@@ -222,4 +220,3 @@ JSON
             plan-summary.md
             dashboards/cost-kpis.json
           if-no-files-found: error
-
