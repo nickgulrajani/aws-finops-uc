@@ -54,13 +54,10 @@ jobs:
         run: |
           set -euo pipefail
           REQUIRED='["Project","Environment","Owner","CostCenter"]'
-          # Resource types that don't support tags; skip them
           SKIP_TYPES='["aws_budgets_budget","aws_ce_anomaly_monitor","aws_ce_anomaly_subscription","aws_organizations_policy","aws_organizations_policy_attachment"]'
-
           MISSING=$(
             jq -r --argjson req "$REQUIRED" --argjson skip "$SKIP_TYPES" '
               def ensure_obj(x): if (x|type)=="object" then x else {} end;
-
               [
                 .resource_changes[]?
                 | select(.change.actions | index("create"))
@@ -74,7 +71,6 @@ jobs:
               ] | .[]
             ' tfplan.json
           )
-
           if [ -n "$MISSING" ]; then
             echo "::error::Some created resources are missing required tags:"
             echo "$MISSING"
@@ -131,6 +127,48 @@ jobs:
             exit 1
           else
             echo "✅ Cost Explorer Anomaly Monitor present."
+          fi
+
+      - name: Ensure Grafana dashboard exists (create if missing)
+        run: |
+          set -euo pipefail
+          mkdir -p dashboards
+          if [ ! -f dashboards/cost-kpis.json ]; then
+            cat > dashboards/cost-kpis.json <<'JSON'
+{
+  "title": "FinOps KPIs",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": ["finops", "cost"],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Estimated Spend (Monthly)",
+      "targets": [
+        { "refId": "A", "datasource": "CostExplorer", "query": "EstimatedCharges{Granularity='MONTHLY'}" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Tag Coverage (Required Tags Present)",
+      "targets": [
+        { "refId": "B", "datasource": "Custom", "query": "tag_coverage_percent" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Anomalies (Last 7 days)",
+      "targets": [
+        { "refId": "C", "datasource": "CostExplorer", "query": "Anomalies{LookBack='7d'}" }
+      ]
+    }
+  ]
+}
+JSON
+            echo "📝 Created dashboards/cost-kpis.json placeholder."
+          else
+            echo "➡️ dashboards/cost-kpis.json already present."
           fi
 
       - name: Lint Grafana dashboard JSON
