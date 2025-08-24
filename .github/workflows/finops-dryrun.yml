@@ -2,7 +2,7 @@ name: finops-dryrun
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   pull_request:
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
         with:
           terraform_version: 1.6.6
 
-      - name: Terraform fmt/validate
+      - name: Terraform fmt and validate
         run: |
           terraform -chdir=terraform init -backend=false
           terraform -chdir=terraform fmt -recursive
@@ -42,7 +42,7 @@ jobs:
             -out=tfplan.binary
           echo "== human-readable plan (first 200 lines) =="
           terraform -chdir=terraform show tfplan.binary | sed -n '1,200p'
-          test -f terraform/tfplan.binary && echo "✅ terraform/tfplan.binary exists"
+          test -f terraform/tfplan.binary && echo "OK: terraform/tfplan.binary exists"
 
       - name: Convert plan to JSON
         run: |
@@ -50,7 +50,7 @@ jobs:
           terraform -chdir=terraform show -json tfplan.binary > tfplan.json
           jq '.resource_changes | length' tfplan.json
 
-      - name: Gate — require core tags on created resources
+      - name: Gate - require core tags on created resources
         run: |
           set -euo pipefail
           REQUIRED='["Project","Environment","Owner","CostCenter"]'
@@ -72,25 +72,25 @@ jobs:
             ' tfplan.json
           )
           if [ -n "$MISSING" ]; then
-            echo "::error::Some created resources are missing required tags:"
+            echo "::error::Created resources missing required tags:"
             echo "$MISSING"
             exit 1
           else
-            echo "✅ Tag policy check passed."
+            echo "OK: tag policy check passed"
           fi
 
-      - name: Gate — ensure a Budget exists
+      - name: Gate - ensure a Budget exists
         run: |
           set -euo pipefail
           HAS_BUDGET=$(jq -r 'any(.resource_changes[]?; .type=="aws_budgets_budget")' tfplan.json)
           if [ "$HAS_BUDGET" != "true" ]; then
-            echo "::error::No aws_budgets_budget found in plan."
+            echo "::error::No aws_budgets_budget found in plan"
             exit 1
           else
-            echo "✅ Budget resource present."
+            echo "OK: budget resource present"
           fi
 
-      - name: Gate — ensure Tag Policy exists with required keys
+      - name: Gate - ensure Tag Policy exists with required keys
         run: |
           set -euo pipefail
           REQUIRED='["Project","Environment","Owner","CostCenter"]'
@@ -109,24 +109,24 @@ jobs:
             ' tfplan.json
           )
           if [ "$OK" != "true" ]; then
-            echo "::group::DEBUG: Tag policy content(s)"
+            echo "::group::DEBUG: tag policy content(s)"
             jq -r '.resource_changes[]? | select(.type=="aws_organizations_policy") | .change.after.content' tfplan.json
             echo "::endgroup::"
-            echo "::error::TAG_POLICY missing or does not include all required keys (Project, Environment, Owner, CostCenter)."
+            echo "::error::TAG_POLICY missing or missing required keys (Project, Environment, Owner, CostCenter)"
             exit 1
           else
-            echo "✅ Organizations TAG_POLICY includes required keys."
+            echo "OK: Organizations TAG_POLICY includes required keys"
           fi
 
-      - name: Gate — ensure Anomaly Monitor exists
+      - name: Gate - ensure Anomaly Monitor exists
         run: |
           set -euo pipefail
           HAS_MON=$(jq -r 'any(.resource_changes[]?; .type=="aws_ce_anomaly_monitor")' tfplan.json)
           if [ "$HAS_MON" != "true" ]; then
-            echo "::error::No aws_ce_anomaly_monitor found in plan."
+            echo "::error::No aws_ce_anomaly_monitor found in plan"
             exit 1
           else
-            echo "✅ Cost Explorer Anomaly Monitor present."
+            echo "OK: Cost Explorer Anomaly Monitor present"
           fi
 
       - name: Ensure Grafana dashboard exists (create if missing)
@@ -146,7 +146,7 @@ jobs:
       "type": "timeseries",
       "title": "Estimated Spend (Monthly)",
       "targets": [
-        { "refId": "A", "datasource": "CostExplorer", "query": "EstimatedCharges{Granularity='MONTHLY'}" }
+        { "refId": "A", "datasource": "CostExplorer", "query": "EstimatedCharges{Granularity=\"MONTHLY\"}" }
       ]
     },
     {
@@ -160,15 +160,15 @@ jobs:
       "type": "stat",
       "title": "Anomalies (Last 7 days)",
       "targets": [
-        { "refId": "C", "datasource": "CostExplorer", "query": "Anomalies{LookBack='7d'}" }
+        { "refId": "C", "datasource": "CostExplorer", "query": "Anomalies{LookBack=\"7d\"}" }
       ]
     }
   ]
 }
 JSON
-            echo "📝 Created dashboards/cost-kpis.json placeholder."
+            echo "Created dashboards/cost-kpis.json placeholder"
           else
-            echo "➡️ dashboards/cost-kpis.json already present."
+            echo "dashboards/cost-kpis.json already present"
           fi
 
       - name: Lint Grafana dashboard JSON
@@ -176,9 +176,9 @@ JSON
           set -euo pipefail
           test -f dashboards/cost-kpis.json
           jq type dashboards/cost-kpis.json >/dev/null
-          echo "✅ dashboards/cost-kpis.json is valid JSON."
+          echo "OK: dashboards/cost-kpis.json is valid JSON"
 
-      - name: Generate plan summary (Markdown)
+      - name: Generate plan summary
         run: |
           set -euo pipefail
           ADDS=$(jq '[.resource_changes[]? | select(.change.actions|index("create"))] | length' tfplan.json)
@@ -198,16 +198,16 @@ JSON
             echo '```'
             echo
             echo "## Gates"
-            echo "- ✅ Required tags on created resources"
-            echo "- ✅ Budget present"
-            echo "- ✅ Organizations TAG_POLICY with core keys"
-            echo "- ✅ CE Anomaly Monitor present"
+            echo "- Required tags on created resources"
+            echo "- Budget present"
+            echo "- Organizations TAG_POLICY with core keys"
+            echo "- CE Anomaly Monitor present"
           } > plan-summary.md
           sed -n '1,120p' plan-summary.md
           {
             echo "### FinOps Plan Summary"
             echo
-            echo "- Adds: **${ADDS}**"
+            echo "- Adds: ${ADDS}"
             echo
             echo "_Artifacts: tfplan.binary, tfplan.json, plan-summary.md, dashboards/cost-kpis.json_"
           } >> "$GITHUB_STEP_SUMMARY"
