@@ -1,0 +1,187 @@
+name: finops-dryrun
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform fmt/validate
+        run: |
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform fmt -recursive
+          terraform -chdir=terraform validate
+
+      - name: Terraform plan (plan-only, no costs)
+        env:
+          AWS_ACCESS_KEY_ID: dummy
+          AWS_SECRET_ACCESS_KEY: dummy
+          AWS_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform plan -refresh=false \
+            -var-file=../tfvars/minimal.tfvars \
+            -out=tfplan.binary
+          echo "== human-readable plan (first 200 lines) =="
+          terraform -chdir=terraform show tfplan.binary | sed -n '1,200p'
+          test -f terraform/tfplan.binary && echo "✅ terraform/tfplan.binary exists"
+
+      - name: Convert plan to JSON
+        run: |
+          set -euo pipefail
+          terraform -chdir=terraform show -json tfplan.binary > tfplan.json
+          jq '.resource_changes | length' tfplan.json
+
+      - name: Gate — require core tags on created resources
+        run: |
+          set -euo pipefail
+          REQUIRED='["Project","Environment","Owner","CostCenter"]'
+          # Resource types that don't support tags; skip them
+          SKIP_TYPES='["aws_budgets_budget","aws_ce_anomaly_monitor","aws_ce_anomaly_subscription","aws_organizations_policy","aws_organizations_policy_attachment"]'
+
+          MISSING=$(
+            jq -r --argjson req "$REQUIRED" --argjson skip "$SKIP_TYPES" '
+              def ensure_obj(x): if (x|type)=="object" then x else {} end;
+
+              [
+                .resource_changes[]?
+                | select(.change.actions | index("create"))
+                | . as $rc
+                | select( ($skip | index($rc.type)) | not )
+                | (ensure_obj($rc.change.after) | (.tags_all // .tags // {})) as $tags
+                | {addr: $rc.address, type: $rc.type,
+                   missing: [$req[] | select( ($tags[.] // null) == null )]}
+                | select(.missing | length > 0)
+                | "\(.addr) (\(.type)) missing: \(.missing|join(", "))"
+              ] | .[]
+            ' tfplan.json
+          )
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::Some created resources are missing required tags:"
+            echo "$MISSING"
+            exit 1
+          else
+            echo "✅ Tag policy check passed."
+          fi
+
+      - name: Gate — ensure a Budget exists
+        run: |
+          set -euo pipefail
+          HAS_BUDGET=$(jq -r 'any(.resource_changes[]?; .type=="aws_budgets_budget")' tfplan.json)
+          if [ "$HAS_BUDGET" != "true" ]; then
+            echo "::error::No aws_budgets_budget found in plan."
+            exit 1
+          else
+            echo "✅ Budget resource present."
+          fi
+
+      - name: Gate — ensure Tag Policy exists with required keys
+        run: |
+          set -euo pipefail
+          REQUIRED='["Project","Environment","Owner","CostCenter"]'
+          OK=$(
+            jq -r --argjson req "$REQUIRED" '
+              any(
+                .resource_changes[]?;
+                (.type=="aws_organizations_policy")
+                and ((.change.after.type // "") == "TAG_POLICY")
+                and (
+                  (try (.change.after.content | fromjson) catch {}) as $c
+                  | ($c.tags // {}) as $t
+                  | ([ $req[] | select( ($t[.] // null) != null ) ] | length) == ($req | length)
+                )
+              )
+            ' tfplan.json
+          )
+          if [ "$OK" != "true" ]; then
+            echo "::group::DEBUG: Tag policy content(s)"
+            jq -r '.resource_changes[]? | select(.type=="aws_organizations_policy") | .change.after.content' tfplan.json
+            echo "::endgroup::"
+            echo "::error::TAG_POLICY missing or does not include all required keys (Project, Environment, Owner, CostCenter)."
+            exit 1
+          else
+            echo "✅ Organizations TAG_POLICY includes required keys."
+          fi
+
+      - name: Gate — ensure Anomaly Monitor exists
+        run: |
+          set -euo pipefail
+          HAS_MON=$(jq -r 'any(.resource_changes[]?; .type=="aws_ce_anomaly_monitor")' tfplan.json)
+          if [ "$HAS_MON" != "true" ]; then
+            echo "::error::No aws_ce_anomaly_monitor found in plan."
+            exit 1
+          else
+            echo "✅ Cost Explorer Anomaly Monitor present."
+          fi
+
+      - name: Lint Grafana dashboard JSON
+        run: |
+          set -euo pipefail
+          test -f dashboards/cost-kpis.json
+          jq type dashboards/cost-kpis.json >/dev/null
+          echo "✅ dashboards/cost-kpis.json is valid JSON."
+
+      - name: Generate plan summary (Markdown)
+        run: |
+          set -euo pipefail
+          ADDS=$(jq '[.resource_changes[]? | select(.change.actions|index("create"))] | length' tfplan.json)
+          TOP=$(jq -r '
+            [.resource_changes[]? | select(.change.actions|index("create")) | .type]
+            | group_by(.) | map({type: .[0], count: length})
+            | sort_by(-.count) | (["Type","Creates"] as $h | $h), (.[] | [.type, (.count|tostring)])
+            | @tsv' tfplan.json | column -t)
+          {
+            echo "# FinOps Plan Summary"
+            echo
+            echo "**Adds:** ${ADDS}"
+            echo
+            echo "## Created Resource Types"
+            echo '```text'
+            echo "$TOP"
+            echo '```'
+            echo
+            echo "## Gates"
+            echo "- ✅ Required tags on created resources"
+            echo "- ✅ Budget present"
+            echo "- ✅ Organizations TAG_POLICY with core keys"
+            echo "- ✅ CE Anomaly Monitor present"
+          } > plan-summary.md
+          sed -n '1,120p' plan-summary.md
+          {
+            echo "### FinOps Plan Summary"
+            echo
+            echo "- Adds: **${ADDS}**"
+            echo
+            echo "_Artifacts: tfplan.binary, tfplan.json, plan-summary.md, dashboards/cost-kpis.json_"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: finops-dryrun-artifacts
+          path: |
+            terraform/tfplan.binary
+            tfplan.json
+            plan-summary.md
+            dashboards/cost-kpis.json
+          if-no-files-found: error
+
